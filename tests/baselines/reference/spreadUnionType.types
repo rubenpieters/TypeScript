@@ -1,0 +1,7 @@
+=== tests/cases/compiler/spreadUnionType.ts ===
+type Group = 'red' | 'blue' | 'green' | 5;
+>Group : Group
+
+const groups = ...Group;
+>groups : Group[]
+

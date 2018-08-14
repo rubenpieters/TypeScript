@@ -16513,6 +16513,31 @@ namespace ts {
             return checkIteratedTypeOrElementType(arrayOrIterableType, node.expression, /*allowStringInput*/ false, /*allowAsyncIterables*/ false);
         }
 
+        function checkSpreadUnionType(node: SpreadUnionType): Type {
+            const typeNode: TypeNode = node.type;
+            const targetType: Type = getTypeFromTypeNode(typeNode);
+
+            if (targetType.flags & TypeFlags.Union) {
+                // TODO(rubenpieters): proper construction of Node
+                (<SpreadUnionType>node).elements = <any>(
+                    (<UnionType>targetType).types.map((type: Type) => {
+                        if (type.flags & TypeFlags.StringLiteral) {
+                            return { kind: SyntaxKind.StringLiteral, text: (<StringLiteralType>type).value, };
+                        } else if (type.flags & TypeFlags.NumberLiteral) {
+                            return { kind: SyntaxKind.NumericLiteral, text: (<NumberLiteralType>type).value.toString(), };
+                        } else {
+                            // TODO: handle more cases/proper error reporting
+                            throw "unhandled type";
+                        }
+                }));
+                return getArrayLiteralType((<UnionType>targetType).types, UnionReduction.Subtype);
+
+            } else {
+                // TODO(rubenpieters): proper error reporting
+                throw "not union type";
+            }
+        }
+
         function hasDefaultValue(node: BindingElement | Expression): boolean {
             return (node.kind === SyntaxKind.BindingElement && !!(<BindingElement>node).initializer) ||
                 (node.kind === SyntaxKind.BinaryExpression && (<BinaryExpression>node).operatorToken.kind === SyntaxKind.EqualsToken);
@@ -22010,6 +22035,8 @@ namespace ts {
                     return checkYieldExpression(<YieldExpression>node);
                 case SyntaxKind.SyntheticExpression:
                     return (<SyntheticExpression>node).type;
+                case SyntaxKind.SpreadUnionType:
+                    return checkSpreadUnionType(<SpreadUnionType>node);
                 case SyntaxKind.JsxExpression:
                     return checkJsxExpression(<JsxExpression>node, checkMode);
                 case SyntaxKind.JsxElement:

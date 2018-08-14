@@ -1,0 +1,8 @@
+=== tests/cases/compiler/spreadUnionType.ts ===
+type Group = 'red' | 'blue' | 'green' | 5;
+>Group : Symbol(Group, Decl(spreadUnionType.ts, 0, 0))
+
+const groups = ...Group;
+>groups : Symbol(groups, Decl(spreadUnionType.ts, 1, 5))
+>Group : Symbol(Group, Decl(spreadUnionType.ts, 0, 0))
+

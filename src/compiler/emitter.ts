@@ -943,6 +943,8 @@ namespace ts {
                         return emitNonNullExpression(<NonNullExpression>node);
                     case SyntaxKind.MetaProperty:
                         return emitMetaProperty(<MetaProperty>node);
+                    case SyntaxKind.SpreadUnionType:
+                        return emitSpreadUnionType(<SpreadUnionType>node);
 
                     // JSX
                     case SyntaxKind.JsxElement:
@@ -1579,6 +1581,11 @@ namespace ts {
             emit(node.type);
             writePunctuation(">");
             emitExpression(node.expression);
+        }
+
+        function emitSpreadUnionType(node: SpreadUnionType) {
+            const elements = node.elements;
+            emitExpressionList(node, elements, ListFormat.ArrayLiteralExpressionElements | ListFormat.None);
         }
 
         function emitParenthesizedExpression(node: ParenthesizedExpression) {

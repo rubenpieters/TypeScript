@@ -437,6 +437,8 @@ namespace ts {
             case SyntaxKind.JsxAttribute:
                 return visitNode(cbNode, (<JsxAttribute>node).name) ||
                     visitNode(cbNode, (<JsxAttribute>node).initializer);
+            case SyntaxKind.SpreadUnionType:
+                return visitNode(cbNode, (<SpreadUnionType>node).type);
             case SyntaxKind.JsxSpreadAttribute:
                 return visitNode(cbNode, (<JsxSpreadAttribute>node).expression);
             case SyntaxKind.JsxExpression:
@@ -3944,6 +3946,12 @@ namespace ts {
                 case SyntaxKind.TildeToken:
                 case SyntaxKind.ExclamationToken:
                     return parsePrefixUnaryExpression();
+                case SyntaxKind.DotDotDotToken:
+                    // TODO(rubenpieters): should this be a unary expression or something else?
+                    // This is modified UnaryExpression grammar in TypeScript
+                    //  UnaryExpression (modified):
+                    //      ... type
+                    return parseSpreadUnionType();
                 case SyntaxKind.DeleteKeyword:
                     return parseDeleteExpression();
                 case SyntaxKind.TypeOfKeyword:
@@ -3987,6 +3995,7 @@ namespace ts {
                 case SyntaxKind.TypeOfKeyword:
                 case SyntaxKind.VoidKeyword:
                 case SyntaxKind.AwaitKeyword:
+                case SyntaxKind.DotDotDotToken:
                     return false;
                 case SyntaxKind.LessThanToken:
                     // If we are not in JSX context, we are parsing TypeAssertion which is an UnaryExpression
@@ -4654,6 +4663,13 @@ namespace ts {
             parseExpected(SyntaxKind.OpenParenToken);
             node.expression = allowInAnd(parseExpression);
             parseExpected(SyntaxKind.CloseParenToken);
+            return finishNode(node);
+        }
+
+        function parseSpreadUnionType(): SpreadUnionType {
+            const node = <SpreadUnionType>createNode(SyntaxKind.SpreadUnionType);
+            parseExpected(SyntaxKind.DotDotDotToken);
+            node.type = parseType();
             return finishNode(node);
         }
 

@@ -264,6 +264,7 @@ namespace ts {
         ConditionalExpression,
         TemplateExpression,
         YieldExpression,
+        SpreadUnionType,
         SpreadElement,
         ClassExpression,
         OmittedExpression,
@@ -1630,6 +1631,12 @@ namespace ts {
         elements: NodeArray<Expression>;
         /* @internal */
         multiLine?: boolean;
+    }
+
+    export interface SpreadUnionType extends PrimaryExpression {
+        kind: SyntaxKind.SpreadUnionType;
+        type: TypeNode;
+        elements: NodeArray<Node>;
     }
 
     export interface SpreadElement extends Expression {
