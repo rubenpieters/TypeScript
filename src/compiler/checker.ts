@@ -10445,8 +10445,8 @@ namespace ts {
             return !!(type.flags & TypeFlags.TypeParameter && (<TypeParameter>type).isThisType);
         }
 
-        function getSimplifiedType(type: Type, writing: boolean): Type {
-            return type.flags & TypeFlags.IndexedAccess ? getSimplifiedIndexedAccessType(<IndexedAccessType>type, writing) :
+        function getSimplifiedType(type: Type, writing: boolean, inReturnStmt: boolean = false, node?: Node): Type {
+            return type.flags & TypeFlags.IndexedAccess ? getSimplifiedIndexedAccessType(<IndexedAccessType>type, writing, inReturnStmt, node) :
                 type.flags & TypeFlags.Conditional ? getSimplifiedConditionalType(<ConditionalType>type, writing) :
                 type;
         }
@@ -10473,7 +10473,45 @@ namespace ts {
         // Transform an indexed access to a simpler form, if possible. Return the simpler form, or return
         // the type itself if no transformation is possible. The writing flag indicates that the type is
         // the target of an assignment.
-        function getSimplifiedIndexedAccessType(type: IndexedAccessType, writing: boolean): Type {
+        function getSimplifiedIndexedAccessType(type: IndexedAccessType, writing: boolean = false, inReturnStmt: boolean, node?: Node): Type {
+            const objectType = getSimplifiedType(type.objectType, writing);
+            const indexType = getSimplifiedType(type.indexType, writing);
+
+            // activate dependent-type-like function checking, when:
+            // 1. index type is a type parameter
+            // 2. index type is able to index the given object type
+            // 3. object type is concrete
+            // 4. we are checking a return statement (the 'inReturnStmt' flag is set)
+            if (
+                indexType.flags & TypeFlags.TypeParameter &&
+                isTypeAssignableTo(indexType, getIndexType(objectType, /*stringsOnly*/ false)) &&
+                objectType.flags & TypeFlags.Object &&
+                inReturnStmt
+            ) {
+                if (node !== undefined) {
+                    const typeParam = <TypeParameter>indexType;
+                    const constraint = getConstraintOfTypeParameter(typeParam);
+                    // if constraint is union
+                    if (constraint !== undefined && constraint.flags & TypeFlags.Union) {
+                        const unionConstraint = <UnionType>constraint;
+                        const mapper = createDepFunLikeMapper(node, typeParam, unionConstraint);
+                        if (mapper !== "default") {
+                            // we received a mapper, instantiate the type using the mapper
+                            return instantiateType(type, mapper);
+                        }
+                        // if mapper result was "default", continue with default behaviour
+                    }
+                    // if constraint is generic
+                    if (constraint !== undefined && constraint.flags & TypeFlags.TypeParameter) {
+                        // TODO: add impl for transitive bound
+                    }
+                    
+                    // constraint cannot be anything else, since that is disallowed
+                }
+                // if node is undefined, this means that control flow graph is not accessible
+                // in that case, continue with default behaviour
+            }
+
             const cache = writing ? "simplifiedForWriting" : "simplifiedForReading";
             if (type[cache]) {
                 return type[cache] === circularConstraintType ? type : type[cache]!;
@@ -10481,8 +10519,8 @@ namespace ts {
             type[cache] = circularConstraintType;
             // We recursively simplify the object type as it may in turn be an indexed access type. For example, with
             // '{ [P in T]: { [Q in U]: number } }[T][U]' we want to first simplify the inner indexed access type.
-            const objectType = getSimplifiedType(type.objectType, writing);
-            const indexType = getSimplifiedType(type.indexType, writing);
+            // const objectType = getSimplifiedType(type.objectType, writing);
+            // const indexType = getSimplifiedType(type.indexType, writing);
             // T[A | B] -> T[A] | T[B] (reading)
             // T[A | B] -> T[A] & T[B] (writing)
             const distributedOverIndex = distributeObjectOverIndexType(objectType, indexType, writing);
@@ -10509,6 +10547,105 @@ namespace ts {
                 return type[cache] = mapType(substituteIndexedMappedType(objectType, type.indexType), t => getSimplifiedType(t, writing));
             }
             return type[cache] = type;
+
+            function createDepFunLikeMapper(node: Node, typeParam: TypeParameter, unionConstraint: UnionType): TypeMapper | "default" {
+                const flow = node.flowNode;
+                if (flow !== undefined) {
+                    const lits = getCheckedWithLiterals(flow, typeParam);
+                    if (lits.t.length === 0 && lits.f.length === 0) {
+                        // if no relevant comparisons were found:
+                        // signal that we want to continue with the default behaviour
+                        return "default";
+                    }
+                    // construct the type mapper
+                    const unionT = getUnionType(lits.t);
+                    const unionF = getUnionType(lits.f);
+                    // keep only literals from true branch checks
+                    const literalsInT = lits.t.length === 0 ?
+                      unionConstraint :
+                      filterType(unionConstraint, (t: Type) => {
+                        return isTypeSubtypeOf(t, unionT);
+                      });
+                    // remove literals from false branch checks
+                    const union = filterType(literalsInT, (t: Type) => {
+                        return ! isTypeSubtypeOf(t, unionF);
+                    });
+                    return createTypeMapper([typeParam], [union]);
+                }
+                return identityMapper;
+            }
+
+            // traverses flow graph to obtain all checked-with string literals
+            // key 't' contains all checked-with literals in true branches
+            // key 'f' contains all checked-with literals in false branches
+            function getCheckedWithLiterals(flow: FlowNode, typeParam: TypeParameter): { t: Type[], f: Type[] } {
+                let testedWithTrue: Type[] = [];
+                let testedWithFalse: Type[] = [];
+                if (flow.flags & FlowFlags.Condition) {
+                    const flowCond = <FlowCondition>flow;
+
+                    // fetch results of antecedent statement recursively
+                    const antecedentChecks = getCheckedWithLiterals(flowCond.antecedent, typeParam);
+                    testedWithTrue = testedWithTrue.concat(antecedentChecks.t);
+                    testedWithFalse = testedWithFalse.concat(antecedentChecks.f);
+
+                    const expr = flowCond.expression;
+                    const trueBranch = !!(flowCond.flags & FlowFlags.TrueCondition);
+                    if (expr.kind === SyntaxKind.BinaryExpression) {
+                        const binExpr = <BinaryExpression>expr;
+                        const opKind = binExpr.operatorToken.kind;
+                        if (opKind === SyntaxKind.EqualsEqualsEqualsToken) {
+                            const left = getReferenceCandidate(binExpr.left);
+                            const right = getReferenceCandidate(binExpr.right);
+
+                            if (
+                                isStringLiteralLike(left) &&
+                                checkTypeParam(left, typeParam)
+                            ) {
+                                const litVal = (<LiteralExpression>left).text;
+                                if (trueBranch) {
+                                    testedWithTrue.push(getLiteralType(litVal));
+                                }
+                                else {
+                                    testedWithFalse.push(getLiteralType(litVal));
+                                }
+                            }
+                            if (
+                                isStringLiteralLike(right) &&
+                                checkTypeParam(left, typeParam)
+                            ) {
+                                const litVal = (<LiteralExpression>right).text;
+                                if (trueBranch) {
+                                    testedWithTrue.push(getLiteralType(litVal));
+                                }
+                                else {
+                                    testedWithFalse.push(getLiteralType(litVal));
+                                }
+                            }
+                        }
+                    }
+                    return { t: testedWithTrue, f: testedWithFalse };
+                }
+                else if (flow.flags & FlowFlags.Assignment) {
+                    return getCheckedWithLiterals((<FlowAssignment>flow).antecedent, typeParam);
+                }
+                // TODO: add other cases
+                else {
+                    return { t: testedWithTrue, f: testedWithFalse };
+                }
+            }
+
+            function checkTypeParam(expr: Expression, typeParam: TypeParameter): boolean {
+                switch (expr.kind) {
+                    case SyntaxKind.Identifier:
+                        return getTypeOfSymbol(getResolvedSymbol(<Identifier>expr)) === typeParam;
+                    case SyntaxKind.NonNullExpression:
+                    case SyntaxKind.ParenthesizedExpression:
+                        return checkTypeParam((expr as NonNullExpression | ParenthesizedExpression).expression, typeParam);
+                    default:
+                        return false;
+                }
+            }
         }
 
         function getSimplifiedConditionalType(type: ConditionalType, writing: boolean) {
@@ -11844,8 +11981,8 @@ namespace ts {
          * Like `checkTypeAssignableTo`, but if it would issue an error, instead performs structural comparisons of the types using the given expression node to
          * attempt to issue more specific errors on, for example, specific object literal properties or tuple members.
          */
-        function checkTypeAssignableToAndOptionallyElaborate(source: Type, target: Type, errorNode: Node | undefined, expr: Expression | undefined, headMessage?: DiagnosticMessage, containingMessageChain?: () => DiagnosticMessageChain | undefined): boolean {
-            return checkTypeRelatedToAndOptionallyElaborate(source, target, assignableRelation, errorNode, expr, headMessage, containingMessageChain, /*errorOutputContainer*/ undefined);
+        function checkTypeAssignableToAndOptionallyElaborate(source: Type, target: Type, errorNode: Node | undefined, expr: Expression | undefined, headMessage?: DiagnosticMessage, containingMessageChain?: () => DiagnosticMessageChain | undefined, inReturnStmt: boolean = false): boolean {
+            return checkTypeRelatedToAndOptionallyElaborate(source, target, assignableRelation, errorNode, expr, headMessage, containingMessageChain, /*errorOutputContainer*/ undefined, inReturnStmt);
         }
 
         function checkTypeRelatedToAndOptionallyElaborate(
@@ -11856,11 +11993,12 @@ namespace ts {
             expr: Expression | undefined,
             headMessage: DiagnosticMessage | undefined,
             containingMessageChain: (() => DiagnosticMessageChain | undefined) | undefined,
-            errorOutputContainer: { errors?: Diagnostic[], skipLogging?: boolean } | undefined
+            errorOutputContainer: { errors?: Diagnostic[], skipLogging?: boolean } | undefined,
+            inReturnStmt: boolean = false,
         ): boolean {
-            if (isTypeRelatedTo(source, target, relation)) return true;
+            if (isTypeRelatedTo(source, target, relation, inReturnStmt, errorNode)) return true;
             if (!errorNode || !elaborateError(expr, source, target, relation, headMessage, containingMessageChain, errorOutputContainer)) {
-                return checkTypeRelatedTo(source, target, relation, errorNode, headMessage, containingMessageChain, errorOutputContainer);
+                return checkTypeRelatedTo(source, target, relation, errorNode, headMessage, containingMessageChain, errorOutputContainer, inReturnStmt);
             }
             return false;
         }
@@ -12560,7 +12698,7 @@ namespace ts {
             return false;
         }
 
-        function isTypeRelatedTo(source: Type, target: Type, relation: Map<RelationComparisonResult>) {
+        function isTypeRelatedTo(source: Type, target: Type, relation: Map<RelationComparisonResult>, inReturnStmt: boolean = false, node?: Node) {
             if (isFreshLiteralType(source)) {
                 source = (<FreshableType>source).regularType;
             }
@@ -12579,7 +12717,7 @@ namespace ts {
                 }
             }
             if (source.flags & TypeFlags.StructuredOrInstantiable || target.flags & TypeFlags.StructuredOrInstantiable) {
-                return checkTypeRelatedTo(source, target, relation, /*errorNode*/ undefined);
+                return checkTypeRelatedTo(source, target, relation, node, /*headMessage*/ undefined, /*containingMessageChain*/ undefined, /*errorOutputContainer*/ undefined, inReturnStmt);
             }
             return false;
         }
@@ -12598,6 +12736,7 @@ namespace ts {
          * @param headMessage If the error chain should be prepended by a head message, then headMessage will be used.
          * @param containingMessageChain A chain of errors to prepend any new errors found.
          * @param errorOutputContainer Return the diagnostic. Do not log if 'skipLogging' is truthy.
+         * @param inReturnStmt Flag which is set to true while checking a return statement.
          */
         function checkTypeRelatedTo(
             source: Type,
@@ -12607,6 +12746,7 @@ namespace ts {
             headMessage?: DiagnosticMessage,
             containingMessageChain?: () => DiagnosticMessageChain | undefined,
             errorOutputContainer?: { errors?: Diagnostic[], skipLogging?: boolean },
+            inReturnStmt: boolean = false,
         ): boolean {
             let errorInfo: DiagnosticMessageChain | undefined;
             let relatedInfo: [DiagnosticRelatedInformation, ...DiagnosticRelatedInformation[]] | undefined;
@@ -12621,7 +12761,7 @@ namespace ts {
 
             Debug.assert(relation !== identityRelation || !errorNode, "no error reporting in identity checking");
 
-            const result = isRelatedTo(source, target, /*reportErrors*/ !!errorNode, headMessage);
+            const result = isRelatedTo(source, target, /*reportErrors*/ !!errorNode, headMessage, /*isApparentIntersectionConstituent*/ undefined, inReturnStmt, errorNode);
             if (overflow) {
                 const diag = error(errorNode, Diagnostics.Excessive_stack_depth_comparing_types_0_and_1, typeToString(source), typeToString(target));
                 if (errorOutputContainer) {
@@ -12760,7 +12900,7 @@ namespace ts {
              * * Ternary.Maybe if they are related with assumptions of other relationships, or
              * * Ternary.False if they are not related.
              */
-            function isRelatedTo(source: Type, target: Type, reportErrors = false, headMessage?: DiagnosticMessage, isApparentIntersectionConstituent?: boolean): Ternary {
+            function isRelatedTo(source: Type, target: Type, reportErrors = false, headMessage?: DiagnosticMessage, isApparentIntersectionConstituent?: boolean, inReturnStmt: boolean = false, node?: Node): Ternary {
                 if (isFreshLiteralType(source)) {
                     source = (<FreshableType>source).regularType;
                 }
@@ -12774,10 +12914,10 @@ namespace ts {
                     target = (<SubstitutionType>target).typeVariable;
                 }
                 if (source.flags & TypeFlags.Simplifiable) {
-                    source = getSimplifiedType(source, /*writing*/ false);
+                    source = getSimplifiedType(source, /*writing*/ false, inReturnStmt, node);
                 }
                 if (target.flags & TypeFlags.Simplifiable) {
-                    target = getSimplifiedType(target, /*writing*/ true);
+                    target = getSimplifiedType(target, /*writing*/ true, inReturnStmt, node);
                 }
 
                 // Try to see if we're relating something like `Foo` -> `Bar | null | undefined`.
@@ -12905,7 +13045,7 @@ namespace ts {
                     // 'string & number | number & number' which reduces to just 'number'.
                     const constraint = getUnionConstraintOfIntersection(<IntersectionType>source, !!(target.flags & TypeFlags.Union));
                     if (constraint) {
-                        if (result = isRelatedTo(constraint, target, reportErrors, /*headMessage*/ undefined, isIntersectionConstituent)) {
+                        if (result = isRelatedTo(constraint, target, reportErrors, /*headMessage*/ undefined, isIntersectionConstituent, inReturnStmt, node)) {
                             errorInfo = saveErrorInfo;
                         }
                     }
@@ -28797,7 +28937,7 @@ namespace ts {
                         // If the function has a return type, but promisedType is
                         // undefined, an error will be reported in checkAsyncFunctionReturnType
                         // so we don't need to report one here.
-                        checkTypeAssignableToAndOptionallyElaborate(unwrappedExprType, unwrappedReturnType, node, node.expression);
+                        checkTypeAssignableToAndOptionallyElaborate(unwrappedExprType, unwrappedReturnType, node, node.expression, /*headMessage*/ undefined, /*containingMessageChain*/ undefined, /*inReturnStmt*/ true);
                     }
                 }
             }
@@ -33765,3 +33905,5 @@ namespace ts {
         }
     }
 }
+
+////

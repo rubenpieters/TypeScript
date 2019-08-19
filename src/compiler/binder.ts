@@ -2119,6 +2119,7 @@ namespace ts {
         }
 
         function bindWorker(node: Node) {
+            node.flowNode = currentFlow;
             switch (node.kind) {
                 /* Strict mode checks */
                 case SyntaxKind.Identifier:
