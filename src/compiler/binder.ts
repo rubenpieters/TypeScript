@@ -2119,7 +2119,6 @@ namespace ts {
         }
 
         function bindWorker(node: Node) {
-            node.flowNode = currentFlow;
             switch (node.kind) {
                 /* Strict mode checks */
                 case SyntaxKind.Identifier:
@@ -2272,6 +2271,14 @@ namespace ts {
                     }
                     if (isInJSFile(node)) {
                         bindCallExpression(<CallExpression>node);
+                    }
+                    break;
+                
+                case SyntaxKind.ReturnStatement:
+                    // TODO: should we only bind the flow graph if the function adheres to the preconditions for dependent-type-like functions?
+                    // (return type is an indexed access with a generic and concrete object type, etc.)
+                    if (currentFlow) {
+                        node.flowNode = currentFlow;
                     }
                     break;
 
